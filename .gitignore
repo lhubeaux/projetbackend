@@ -1,2 +1,29 @@
+# Notes personnelles (non livrées)
 explications.md
-/pycache
+
+# Claude
+.claude
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# SQLite
+*.db
+*.sqlite
+*.sqlite3
+
+# Tests / outils
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
