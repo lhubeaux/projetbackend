@@ -19,11 +19,15 @@ Aucune route ni logique métier ici : uniquement le montage de l'application.
 from flask import Flask
 from app.dal.database import db
 from config import DevConfig
+from app.dal import models
+
 
 def create_app(config_class=DevConfig):
     app = Flask(__name__)
     app.config.from_object(config_class)
     db.init_app(app)
-    # To do: ajouter create_all (tables) + blueprints
+    with app.app_context():
+        db.create_all()
 
     return app
+
