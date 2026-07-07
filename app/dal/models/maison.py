@@ -2,16 +2,18 @@
 
 from app.dal.database import db
 from app.dal.models.timestamps import TimestampMixin
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 
 class Maison(TimestampMixin, db.Model):
     __tablename__ = "maisons"
-    id = Column(Integer, primary_key=True)
-    nom = Column(String(50), unique=True, nullable=False)
-    couleur = Column(String(50))
-    fondateur = Column(String(50))
-    valeurs = Column(String(255))
-    reputation = Column(Integer, default=0, nullable=False)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    nom: Mapped[str] = mapped_column(String(50), unique=True)
+    couleur: Mapped[str] = mapped_column(String(50))
+    reputation: Mapped[int] = mapped_column(default=0)
+    fondateur: Mapped[str] = mapped_column(String(50))
+    valeurs: Mapped[str] = mapped_column(Text)
 
 
     def __repr__(self): #permet une représenation plus propre pour le dev
