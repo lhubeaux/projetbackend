@@ -1,7 +1,9 @@
-"""Data Access Layer : la seule couche qui exécute des requêtes SQLAlchemy.
+"""DAL — Data Access Layer.
 
-Un repository par domaine (eleve_repository.py, cours_repository.py, ...).
-Contient les opérations de lecture/écriture (get, list, create, update,
-delete) et les requêtes optimisées (joinedload/selectinload pour la chasse
-au N+1 du jour 2). Ne connaît ni le HTTP ni les règles métier.
+Dossier « parapluie » regroupant tout ce qui touche à l'accès aux données :
+    - database.py    : l'instance SQLAlchemy partagée (db)
+    - models/        : les classes SQLAlchemy (les tables)
+    - repositories/  : les requêtes SQLAlchemy, un repository par entité
+
+Aucune logique HTTP ni métier ici.
 """

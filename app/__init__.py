@@ -16,3 +16,14 @@ Aucune route ni logique métier ici : uniquement le montage de l'application.
     #     ... enregistrement des blueprints ...
     #     return app
 """
+from flask import Flask
+from app.dal.database import db
+from config import DevConfig
+
+def create_app(config_class=DevConfig):
+    app = Flask(__name__)
+    app.config.from_object(config_class)
+    db.init_app(app)
+    # To do: ajouter create_all (tables) + blueprints
+
+    return app

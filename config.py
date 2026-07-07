@@ -16,3 +16,17 @@ Lit les variables d'environnement (documentées dans le README au jour 4).
     #     TESTING = True
     #     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"   # base isolée des tests
 """
+import os
+
+class BaseConfig:
+    SECRET_KEY = os.getenv("SECRET_KEY", "azerty123")
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    PROMOTION_THRESHOLD = 10
+
+class DevConfig(BaseConfig):
+    SQLALCHEMY_DATABASE_URI = "sqlite:///academie.db"
+    SQLALCHEMY_ECHO = True
+
+class TestConfig(BaseConfig):
+    SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
+    TESTING = True

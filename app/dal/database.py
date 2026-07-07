@@ -7,3 +7,5 @@ via db.init_app(app). Ce fichier ne dépend de rien d'autre.
     # from flask_sqlalchemy import SQLAlchemy
     # db = SQLAlchemy()
 """
+from flask_sqlalchemy import SQLAlchemy
+db = SQLAlchemy()
