@@ -9,3 +9,4 @@ contraintes d'unicité). Aucune logique HTTP ni métier ici.
 """
 from app.dal.models.maison import Maison
 from app.dal.models.professeur import Professeur
+from app.dal.models.cours import Cours

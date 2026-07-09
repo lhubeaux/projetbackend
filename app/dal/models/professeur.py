@@ -3,7 +3,7 @@
 from app.dal.database import db
 from app.dal.models.timestamps import TimestampMixin
 from sqlalchemy import String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 
 class Professeur(TimestampMixin, db.Model):
@@ -14,6 +14,8 @@ class Professeur(TimestampMixin, db.Model):
     prenom: Mapped[str] = mapped_column(String(50))
     matiere: Mapped[str] = mapped_column(String(50))
     anciennete: Mapped[int] = mapped_column(default=0)
+
+    cours: Mapped[list["Cours"]] = relationship(back_populates="professeur")
 
     def __repr__(self): #permet une représenation plus propre pour le dev
         return f"<ID: {self.id} - Professeur : {self.nom}>"

@@ -42,7 +42,16 @@ def modifier(professeur_id):
 
 
 def supprimer(professeur_id):
-    supprime = repo.delete_professeur(professeur_id)
-    if not supprime:
+    professeur = repo.get_by_id(professeur_id)
+    if professeur is None:
         abort(make_response(jsonify({"error": "Professeur introuvable"}), 404))
+
+    nb_cours = len(professeur.cours)
+    if nb_cours > 0:
+        abort(make_response(jsonify({
+            "error": f"Impossible de supprimer : ce professeur est responsable de {nb_cours} cours"
+        }), 409))
+
+    repo.delete_professeur(professeur_id)
     return "", 204
+
