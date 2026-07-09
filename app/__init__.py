@@ -8,7 +8,7 @@ from flask import Flask
 from app.dal.database import db
 from config import DevConfig
 from app.dal import models
-from app.api.routes.maison_route import maison_bp
+from app.api.routes import ALL_BLUEPRINTS
 from app.common.errors import register_error_handlers
 
 def create_app(config_class=DevConfig):
@@ -16,11 +16,9 @@ def create_app(config_class=DevConfig):
     app.config.from_object(config_class)
     db.init_app(app)
 
-    app.register_blueprint(maison_bp)
+    for bp in ALL_BLUEPRINTS:
+        app.register_blueprint(bp)
     register_error_handlers(app)
-
-    with app.app_context():
-        db.create_all()
 
     return app
 # 

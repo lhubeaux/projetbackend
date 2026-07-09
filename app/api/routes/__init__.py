@@ -1,7 +1,8 @@
-"""Routes : blueprints qui associent une URL à une fonction de controller.
+"""Registre des blueprints de l'API."""
+from app.api.routes.maison_route import maison_bp
+from app.api.routes.professeur_route import professeur_bp
 
-Un fichier = un blueprint = un domaine (eleves.py, maisons.py, cours.py,
-examens.py, login.py, ...). Ces fichiers ne font que le câblage
-URL -> fonction du controller. Les blueprints sont enregistrés dans l'app
-factory (app/__init__.py).
-"""
+ALL_BLUEPRINTS = (
+    maison_bp,
+    professeur_bp,
+)
