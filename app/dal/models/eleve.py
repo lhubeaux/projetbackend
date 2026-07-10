@@ -19,6 +19,9 @@ class Eleve(TimestampMixin, db.Model):
     maison_id: Mapped[int] = mapped_column(ForeignKey("maisons.id"))
 
     maison: Mapped["Maison"] = relationship(back_populates="eleves")
+    utilisateur: Mapped["Utilisateur | None"] = relationship(back_populates="eleve")
+
+
 
     def __repr__(self): #permet une représenation plus propre pour le dev
         return f"<ID: {self.id} - Eleve : {self.nom}>"

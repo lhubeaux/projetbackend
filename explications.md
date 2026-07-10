@@ -51,6 +51,12 @@ Ce fichier regroupe les concepts expliqués au fil du projet.
 45. [Qu'est-ce qu'une fonction « helper » ?](#sec45)
 46. [Vérifier une FK dans le controller, morceau par morceau](#sec46)
 47. [`Literal[]` de Pydantic : annotation de type, pas argument de `Field()`](#sec47)
+48. [Implémenter la classe `Utilisateur` : FK nullables, `model_validator`, 1-1](#sec48)
+49. [`utilisateur_schema.py` : pourquoi `Update` est amputé de la moitié de ses champs](#sec49)
+50. [Insérer un `model_validator` : `mode`, `return self`, `raise ValueError`, et le `loc` vide](#sec50)
+51. [`utilisateur_schema.py` en entier, commenté bloc par bloc](#sec51)
+52. [Le validator sera-t-il réutilisé ? (et le trou du seed)](#sec52)
+53. [`controller_utilisateur.py` : FK conditionnelles, unicité de l'email, et le 409](#sec53)
 
 ---
 
@@ -2597,3 +2603,582 @@ Deux fautes cumulées :
 `Literal[...]` = **quelles** valeurs sont même autorisées, au niveau du type. Les deux se
 combinent (`Literal[...] = Field(default=...)`), mais `Literal` n'est jamais un argument
 *dans* `Field()`.
+
+---
+
+<a id="sec48"></a>
+## Implémenter la classe `Utilisateur` : FK nullables, `model_validator`, 1-1
+
+Le **choix de conception** (association plutôt qu'héritage) est tranché en [sec36](#sec36).
+Reste le **comment**. Même verticale que d'habitude (modèle → repository → schémas →
+controller → routes), mais avec trois pièges que les 4 premières verticales n'avaient pas.
+
+### Le modèle : deux FK nullables, `unique=True` dessus
+
+```python
+class Utilisateur(TimestampMixin, db.Model):
+    __tablename__ = "utilisateurs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(120), unique=True)
+    # TEMPORAIRE — mot de passe en clair (cf. cahier des charges, jour 1).
+    # À remplacer par un hash (bcrypt/argon2) hors cadre pédagogique.
+    mot_de_passe: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(20))
+
+    eleve_id: Mapped[int | None] = mapped_column(ForeignKey("eleves.id"), unique=True)
+    professeur_id: Mapped[int | None] = mapped_column(ForeignKey("professeurs.id"), unique=True)
+```
+
+- **`Mapped[int | None]`** → colonne nullable. C'est ce qui permet à l'admin de n'être lié
+  à personne, et à un compte élève de laisser `professeur_id` vide.
+- **`unique=True` sur les deux FK** → traduit le « lié à **exactement un** Élève » du
+  cahier : deux comptes ne peuvent pas pointer vers le même élève. Astuce : SQL autorise
+  **plusieurs `NULL`** dans une colonne unique, donc les admins (deux FK à `NULL`)
+  coexistent sans problème. La contrainte porte sur les valeurs réelles, pas sur les absences.
+- **`email` unique** → clé naturelle du login **et** du seed idempotent (get-or-create).
+
+### Piège 1 — la contrainte « rôle ↔ lien » ne va pas en base
+
+Règle : `role="eleve"` ⇒ `eleve_id` rempli **et** `professeur_id` vide ;
+`role="professeur"` ⇒ l'inverse ; `role="admin"` ⇒ les deux vides.
+
+Le cahier dit « contrainte **applicative**, pas forcément en base » — et pour cause : une
+base exprime mal une règle *conditionnelle* (il faudrait un `CHECK` alambiqué). Sa place
+est dans le **schéma Pydantic**, via un `model_validator` :
+
+```python
+from pydantic import model_validator
+
+class UtilisateurCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    mot_de_passe: str = Field(min_length=1)
+    role: Literal["eleve", "professeur", "admin"]
+    eleve_id: int | None = Field(default=None, ge=1)
+    professeur_id: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def verifier_coherence_role_lien(self):
+        if self.role == "eleve" and (self.eleve_id is None or self.professeur_id is not None):
+            raise ValueError("un utilisateur 'eleve' doit référencer un eleve_id, et aucun professeur_id")
+        # ... idem pour "professeur" et "admin"
+        return self
+```
+
+**`Field` vs `model_validator`** : `Field` valide **un champ isolément** ([sec47](#sec47)) ;
+`model_validator(mode="after")` voit **l'objet entier, une fois tous les champs validés** —
+donc il peut les **comparer entre eux**. Le `mode="after"` est essentiel : en
+`mode="before"` on reçoit un dict brut, non typé.
+
+Bonne nouvelle : `validate_body` ([sec18](#sec18)) attrape déjà `ValidationError`, et
+Pydantic **emballe les `ValueError` levées dans un validator** en `ValidationError`. Le 400
+sort donc tout seul, sans toucher à `common/validation.py`. ⚠️ Nuance importante : le nom du
+champ fautif, lui, n'apparaît **pas** automatiquement — un `model_validator` a un `loc` vide.
+Détail en [sec50](#sec50).
+
+⚠️ `EmailStr` exige le paquet `email-validator` (`pip install email-validator`, puis
+`requirements.txt`). Sans dépendance supplémentaire : un `Field(pattern=...)`, moins strict.
+
+### Piège 2 — ne jamais sérialiser le mot de passe
+
+`UtilisateurOut` ne doit **pas** contenir `mot_de_passe`. Contrairement aux autres schémas
+`Out` où tous les champs du modèle sont recopiés, ici **l'omission est volontaire** : c'est
+le point le plus important du fichier. Y laisser un commentaire explicite, sinon un futur
+copier-coller le réintroduira (le piège habituel du projet, cf. [sec45](#sec45)).
+
+Le controller doit par ailleurs vérifier que `eleve_id`/`professeur_id` référencent des
+entités **existantes** — le même helper `_verifier_xxx` que Cours et Élève ([sec46](#sec46)),
+appliqué conditionnellement selon le rôle.
+
+### Piège 3 — la relation 1-1 : c'est l'annotation qui décide
+
+La FK est du côté `Utilisateur`. Par défaut, SQLAlchemy déduirait **many-to-one** dans ce
+sens et **one-to-many** dans l'autre (donc une *liste* côté `Eleve`). Mais en style
+**SQLAlchemy 2.0** (`Mapped[...]`), c'est **l'annotation de type qui tranche** :
+
+```python
+# Utilisateur (porte la FK)
+eleve: Mapped["Eleve | None"] = relationship(back_populates="utilisateur")
+
+# Eleve (côté inverse)
+utilisateur: Mapped["Utilisateur | None"] = relationship(back_populates="eleve")
+```
+
+`Mapped["Utilisateur | None"]` est **scalaire** (ce n'est pas `Mapped[list["Utilisateur"]]`)
+→ SQLAlchemy en déduit un **1-1**, et `eleve.utilisateur` renvoie bien un objet.
+
+⚠️ **`uselist=False` est inutile ici** (vérifié en exécution). Il n'était nécessaire qu'avec
+l'**ancien style** `Column` + `relationship()` sans annotation typée, où SQLAlchemy n'avait
+aucun indice et supposait une liste. Le contraste avec `Maison.eleves`, qui est bien
+`Mapped[list["Eleve"]]` (1-N), montre que tout se joue dans l'annotation.
+
+Ce qui garantit réellement l'unicité, c'est le **`unique=True` sur la FK** côté base — pas
+l'annotation, qui ne renseigne que l'ORM. (Rappel des deux `relationship` en [sec42](#sec42).)
+
+### Enchaîner sur `POST /login`
+
+Une fois le modèle posé, le login est court : un `get_by_email()` dans le repository (le
+seul finder non-CRUD nécessaire), comparaison directe des mots de passe, retour de
+`{id, email, role, eleve_id, professeur_id}`.
+
+**Réflexe de sécurité à garder malgré le mot de passe en clair** : mauvais email **ou**
+mauvais mot de passe → **401 avec le même message générique** (« identifiants invalides »).
+Jamais « cet email n'existe pas » : ce serait offrir un moyen d'**énumérer les comptes**.
+
+<a id="sec49"></a>
+## `utilisateur_schema.py` : pourquoi `Update` est amputé de la moitié de ses champs
+
+[sec48](#sec48) a posé le principe du `model_validator` et l'omission du mot de passe.
+Reste à écrire les trois classes. Le gabarit est `eleve_schema.py` — même docstring en tête,
+mêmes `XxxCreate` / `XxxUpdate` / `XxxOut` — mais avec un import de plus (`model_validator`)
+et une classe `Update` qui ne ressemble pas aux précédentes.
+
+### `UtilisateurCreate` : les longueurs doivent refléter le modèle
+
+Le modèle déclare `String(120)` pour l'email et `String(255)` pour le mot de passe. Les
+`max_length` du schéma reprennent **ces nombres-là**. Sans quoi Pydantic laisse passer une
+chaîne trop longue : SQLite la tronque silencieusement, et Postgres (le jour d'une
+migration) la rejettera avec une erreur bien moins lisible qu'un 400 propre.
+
+Pour `role`, rappel de [sec47](#sec47) : `Literal[...]` est une **annotation de type**, pas
+un argument de `Field()`. Les trois valeurs sont celles du commentaire du modèle.
+
+Les deux FK sont `int | None` avec `default=None` (l'admin n'est lié à personne) et une
+borne `ge=1`. Ordre des arguments : `Field(default=None, ge=1)`, le défaut d'abord.
+
+Puis le `model_validator(mode="after")`. **Trois** cas à couvrir, pas deux : le rôle `admin`
+exige que **les deux** FK soient vides, et c'est celui qu'on oublie. Écrire chaque branche
+comme « ce qui doit être vrai pour ce rôle » plutôt qu'en empilant des négations : on relit
+la règle du cahier des charges directement dans le code.
+
+### `UtilisateurUpdate` : la vraie décision de conception
+
+`update_utilisateur()` ne touche que `email` et `mot_de_passe`. Le schéma `Update` ne
+déclare donc **que ces deux champs**. Grâce à `extra="forbid"`, un client qui tenterait de
+PATCHer `role` ou `eleve_id` reçoit un **400 explicite** au lieu de voir sa requête
+silencieusement ignorée. Schéma et repository disent la même chose — c'est ça, la cohérence.
+
+Mais la raison profonde est ailleurs : **un `model_validator` ne peut pas valider un PATCH
+partiel**. Si le client n'envoie que `role`, le validator voit `eleve_id = None` alors qu'en
+base il vaut peut-être `3`. Il n'a **aucun accès à l'état stocké** : Pydantic valide un
+payload, pas une ligne de base de données. La validation croisée n'a de sens que sur un
+objet **complet**, donc sur `Create`.
+
+Plutôt que de laisser traîner une règle à moitié vérifiable, on **retire du PATCH les champs
+qu'elle gouverne**. Si changer un rôle devient nécessaire, ce sera une opération dédiée
+(qui relira l'utilisateur en base avant de valider). Conséquence directe : **pas de
+`model_validator` dans `UtilisateurUpdate`**.
+
+Les deux champs restants suivent la forme habituelle : `T | None = Field(default=None, ...)`.
+
+### `UtilisateurOut` : l'omission est le point important
+
+`from_attributes=True`, tous les champs du modèle **sauf `mot_de_passe`**, plus `created_at`
+et `updated_at`. Les FK y figurent en `int | None`, et `role` reprend le même `Literal`.
+
+Détail rassurant : cette omission ne provoque **aucune erreur**. `extra="forbid"` n'est pas
+sur `Out`, et `from_attributes` lit uniquement les attributs **listés dans le schéma**, en
+ignorant le reste de l'objet SQLAlchemy. Y laisser un commentaire explicite malgré tout :
+c'est exactement le genre de ligne qu'un futur copier-coller réintroduit sans réfléchir
+(cf. [sec45](#sec45)).
+
+### Coquille repérée au passage
+
+Dans `eleve_schema.py`, `EleveUpdate.statut` a `default="inscrit"` au lieu de
+`default=None`. Sans conséquence aujourd'hui — le controller passe `exclude_unset=True`,
+donc un champ non envoyé n'apparaît pas dans le dict — mais c'est trompeur à la lecture, et
+ça casserait le jour où l'on oublierait `exclude_unset`. Ne pas recopier ce motif.
+
+<a id="sec50"></a>
+## Insérer un `model_validator` : `mode`, `return self`, `raise ValueError`, et le `loc` vide
+
+### Où ça se place
+
+Dans le corps de `UtilisateurCreate`, **après** les déclarations de champs. C'est une
+**méthode de la classe**, pas une fonction libre. Import supplémentaire : `model_validator`,
+depuis `pydantic`. Le décorateur coiffe une méthode d'instance ordinaire — elle prend
+`self`, **pas** de `@classmethod`. Son nom est libre : il n'est appelé nulle part, il ne
+sert qu'à documenter la règle.
+
+### Pourquoi `mode="after"`
+
+Le mode décide de **ce que le validator reçoit**.
+
+| mode | reçoit | typé ? |
+|---|---|---|
+| `"before"` | le dict JSON brut | non — `data.get("role")`, contenu arbitraire |
+| `"after"` | `self`, l'instance construite | oui — chaque champ a déjà passé sa validation |
+
+En `mode="after"`, `self.role` est **garanti** être l'une des trois chaînes du `Literal`,
+`self.eleve_id` est un `int` ou `None`, jamais autre chose. On peut donc enfin **comparer
+les champs entre eux** — ce que `Field()` ne sait pas faire, puisqu'il n'en voit qu'un
+à la fois ([sec47](#sec47)).
+
+**Corollaire qui simplifie le code** : si le client envoie `role="dragon"`, le `Literal`
+rejette et le validator **ne s'exécute jamais**. Aucun `else` défensif à prévoir pour un rôle
+inconnu : les trois branches couvrent tout l'espace des possibles.
+
+### Deux règles obligatoires
+
+1. **Retourner `self`** à la fin. La valeur retournée *devient* l'objet validé ; oublier le
+   `return` casse la validation.
+2. **Lever un `ValueError`** pour signaler une violation. Pydantic intercepte les
+   `ValueError` levées dans un validator et les emballe dans la `ValidationError` globale.
+
+Surtout **pas** de `abort()` ni de `jsonify()` ici : un schéma ne connaît pas HTTP. C'est
+`validate_body` qui traduit, et il le fait déjà.
+
+### La structure des trois branches
+
+Raisonner par rôle, dans l'ordre du cahier des charges : `"eleve"` ⇒ `eleve_id` rempli **et**
+`professeur_id` vide ; `"professeur"` ⇒ l'inverse ; `"admin"` ⇒ les deux vides.
+
+Trois `if` successifs, **un `raise` par branche**, avec un message qui dit *précisément*
+quelle règle est violée. Résister au message générique (« rôle et liens incohérents ») :
+c'est le client de l'API qui le lira, et il ne saurait pas quoi corriger.
+
+Il existe une version compacte — un dict `{role: champ_requis}` puis une vérification
+générique unique. Élégant, mais moins lisible pour trois entrées, et on y perd les messages
+spécifiques.
+
+### ⚠️ Le `loc` vide (correctif à [sec48](#sec48))
+
+`validate_body` construit chaque erreur ainsi :
+
+```python
+{"champ": ".".join(str(p) for p in err["loc"]), "message": err["msg"]}
+```
+
+Quand un **`Field()`** échoue, Pydantic remplit `loc` avec le nom du champ → la réponse
+contient `{"champ": "email", ...}`. Mais un **`model_validator` porte sur le modèle entier,
+pas sur un champ** : son `loc` est un **tuple vide**, donc le `join` produit `""` et le
+client reçoit `{"champ": "", "message": "Value error, ..."}`.
+
+**Conséquence pratique : le message doit nommer lui-même les champs concernés**, puisque la
+clé `champ` sera vide. Mentionner explicitement `eleve_id` et `professeur_id` dans le texte.
+(Pydantic préfixe automatiquement le texte par `Value error, ` — c'est normal.)
+
+### Ce que le validator ne fait pas
+
+Il vérifie la **cohérence interne du payload**, rien d'autre. Que l'`eleve_id` référence un
+élève **existant** est une question de base de données : ça se traite dans le controller,
+avec le helper `_verifier_xxx` ([sec46](#sec46)). Un schéma Pydantic n'ouvre **jamais** de
+session SQLAlchemy.
+
+Et rappel de [sec49](#sec49) : rien de tout ça dans `UtilisateurUpdate`, où la validation
+croisée serait mensongère.
+
+<a id="sec51"></a>
+## `utilisateur_schema.py` en entier, commenté bloc par bloc
+
+Synthèse de [sec49](#sec49) (les trois classes) et [sec50](#sec50) (le validator).
+
+```python
+"""Schémas Pydantic pour la ressource Utilisateur.
+
+- UtilisateurCreate : payload attendu en création (POST)
+- UtilisateurUpdate : mise à jour partielle (PATCH), email et mot de passe seulement
+- UtilisateurOut    : forme sérialisée renvoyée par l'API — sans le mot de passe
+"""
+
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Literal
+
+
+class UtilisateurCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Si un champ non présent dans le schema est ajouté -- erreur 400
+    email: str = Field(min_length=1, max_length=120)
+    mot_de_passe: str = Field(min_length=1, max_length=255)
+    role: Literal["eleve", "professeur", "admin"]
+    eleve_id: int | None = Field(default=None, ge=1)
+    professeur_id: int | None = Field(default=None, ge=1)
+    # FK nullables : l'admin n'est lié ni à un élève ni à un professeur
+
+    @model_validator(mode="after")
+    def verifier_coherence_role_lien(self):
+        # mode="after" : les champs sont déjà typés et validés, on peut les comparer.
+        # Un role hors du Literal n'arrive jamais ici -> aucune branche else à prévoir.
+        if self.role == "eleve" and (self.eleve_id is None or self.professeur_id is not None):
+            raise ValueError("role 'eleve' : eleve_id obligatoire, professeur_id interdit")
+        if self.role == "professeur" and (self.professeur_id is None or self.eleve_id is not None):
+            raise ValueError("role 'professeur' : professeur_id obligatoire, eleve_id interdit")
+        if self.role == "admin" and (self.eleve_id is not None or self.professeur_id is not None):
+            raise ValueError("role 'admin' : ni eleve_id ni professeur_id ne doivent être renseignés")
+        return self  # obligatoire : la valeur retournée devient l'objet validé
+
+
+class UtilisateurUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Seuls email et mot_de_passe sont modifiables : role et FK ne changent pas par un PATCH.
+    # extra="forbid" -> tenter de patcher role donne un 400 explicite, pas un silence.
+    # Pas de model_validator ici : sur un payload partiel il ne verrait pas l'état en base.
+    email: str | None = Field(default=None, min_length=1, max_length=120)
+    mot_de_passe: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class UtilisateurOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    # mot_de_passe est volontairement absent : il ne sort JAMAIS de l'API.
+    role: Literal["eleve", "professeur", "admin"]
+    eleve_id: int | None
+    professeur_id: int | None
+    created_at: datetime
+    updated_at: datetime
+```
+
+### Les imports
+
+`model_validator` est le **seul** import nouveau par rapport aux quatre autres schémas.
+
+### `UtilisateurCreate`, les champs
+
+- `email` / `mot_de_passe` reprennent les longueurs du **modèle** (`String(120)`, `String(255)`).
+  Le `min_length=1` interdit la chaîne vide, que `str` seul accepterait.
+- `role` n'a **pas** de `Field()` : le `Literal` est à **gauche** du `:` (annotation de type),
+  et rien à droite du `=` → champ obligatoire. C'est le piège de [sec47](#sec47).
+- Les FK sont `int | None` (comme `Mapped[int | None]` dans le modèle) avec `default=None`,
+  ce qui **autorise l'admin à exister**. Le `ge=1` ne s'applique que si une valeur est
+  fournie ; il est ignoré sur `None`. Ordre : `default` d'abord, contrainte ensuite.
+
+### Le validator, ligne à ligne
+
+`@model_validator(mode="after")` place la méthode **après** la validation champ par champ.
+D'où le `self` : l'instance existe, `self.role` est forcément l'une des trois chaînes.
+
+Chaque `if` traduit une ligne du cahier des charges. Les lire comme « pour ce rôle, voici ce
+qui est **mal** » : soit le lien obligatoire manque (`is None`), soit le lien interdit est
+présent (`is not None`). Un `or` suffit — une seule des deux fautes invalide le payload.
+
+Les messages **nomment les champs**, parce que la clé `champ` de la réponse JSON sera vide
+(`loc` vide, cf. [sec50](#sec50)). Sans ça le client reçoit
+`{"champ": "", "message": "Value error, incohérent"}` et ne sait rien.
+
+`raise ValueError` et **non** `abort()` : Pydantic l'emballe en `ValidationError`, que
+`validate_body` attrape déjà ([sec18](#sec18)). Le schéma reste ignorant de HTTP.
+
+Le `return self` final n'est pas décoratif : la valeur retournée **devient** l'objet validé.
+
+### `UtilisateurUpdate`
+
+Deux champs, et c'est tout. Les commentaires **portent la décision de conception** : l'absence
+de `role` est un choix, pas un oubli. Sans eux, on le « corrigera » dans trois semaines.
+
+### `UtilisateurOut`
+
+Le commentaire à la place de `mot_de_passe` est **la ligne la plus importante du fichier**.
+`from_attributes=True` ne lit sur l'objet SQLAlchemy que les attributs **listés ici** : ne pas
+déclarer le champ suffit à ne jamais le sérialiser, aucune erreur n'est levée.
+
+`role` reprend le `Literal` → Pydantic valide aussi **à la sortie**, ce qui attraperait une
+valeur douteuse insérée directement en base. Les FK restent `int | None` : un admin renverra
+deux `null`.
+
+<a id="sec52"></a>
+## Le validator sera-t-il réutilisé ? (et le trou du seed)
+
+Réponse courte : **non, pas cette fonction-là**. Mais la question mérite mieux qu'un non.
+
+### Un seul appelant, aujourd'hui
+
+`verifier_coherence_role_lien` est attaché à `UtilisateurCreate` et ne tourne qu'au
+`POST /utilisateurs`. `UtilisateurUpdate` interdit `role` et les FK → rien à valider
+([sec49](#sec49)). Le futur `POST /login` prendra un schéma à deux champs, sans règle croisée.
+Aucun autre endroit du cahier des charges ne manipule le triplet
+`role` / `eleve_id` / `professeur_id`.
+
+L'extraire maintenant serait de la **factorisation spéculative** : une fonction pour un seul
+appelant, c'est du couplage payé d'avance contre un besoin imaginaire.
+
+### ⚠️ Le trou : le seed contourne Pydantic
+
+`scripts/seed.py` doit créer « un utilisateur par élève/professeur + un compte admin ». S'il
+appelle directement `create_utilisateur()` du repository, il **court-circuite entièrement
+Pydantic**, donc le validator. Rien n'empêche alors de semer un admin muni d'un `eleve_id`.
+
+C'est le point à retenir : **le validator protège la porte HTTP, pas le modèle.** Le modèle
+accepte n'importe quelle combinaison, puisque le cahier des charges a choisi une contrainte
+*applicative* plutôt qu'un `CHECK` en base ([sec48](#sec48)).
+
+**Parade gratuite, et vraie réutilisation** : que le seed construise un
+`UtilisateurCreate(...)` puis passe son `.model_dump()` au repository. Il hérite de la
+validation sans une ligne de plus. Y penser le jour où l'on écrira le seed.
+
+### Le jour où la règle servira deux fois
+
+Si un endpoint « changer le rôle » apparaît, il lui faudra la même règle, mais appliquée à un
+objet reconstitué depuis la base **et** le payload. C'est **à ce moment-là** — pas avant —
+qu'on extraira la logique dans une fonction ordinaire prenant `(role, eleve_id,
+professeur_id)`, appelée depuis les deux validators.
+
+### Le mécanisme, pour la culture
+
+Un `model_validator` est une **méthode**, donc **il s'hérite**. Un schéma qui sous-classe
+`UtilisateurCreate`, ou une classe-mixin héritant de `BaseModel` et portant la règle, la
+transmet automatiquement. C'est le motif Pydantic habituel — pas un `import` de fonction.
+
+Mais l'héritage entre schémas se paie en couplage, et il n'y a qu'un appelant. Laisser la
+méthode où elle est.
+
+<a id="sec53"></a>
+## `controller_utilisateur.py` : FK conditionnelles, unicité de l'email, et le 409
+
+Le gabarit est `controller_eleve.py`. Trois choses seulement changent.
+
+```python
+"""Controller Utilisateur : orchestre la logique HTTP de la ressource.
+
+Valide l'entrée via les schémas Pydantic, délègue la persistance au
+repository, renvoie une réponse JSON avec le bon code HTTP.
+"""
+
+from flask import jsonify, abort, make_response
+from app.common.validation import validate_body
+from app.api.schemas.utilisateur_schema import UtilisateurCreate, UtilisateurUpdate, UtilisateurOut
+from app.dal.repositories import utilisateur_repository as repo
+from app.dal.repositories import eleve_repository as eleve_repo
+from app.dal.repositories import professeur_repository as prof_repo
+
+
+def _serialize(utilisateur):
+    return UtilisateurOut.model_validate(utilisateur).model_dump(mode="json")
+
+
+def _verifier_eleve(eleve_id):
+    """Interrompt la requête (400) si l'élève référencé n'existe pas."""
+    if eleve_repo.get_by_id(eleve_id) is None:
+        abort(make_response(jsonify({"error": f"Eleve {eleve_id} introuvable"}), 400))
+
+
+def _verifier_professeur(professeur_id):
+    """Interrompt la requête (400) si le professeur référencé n'existe pas."""
+    if prof_repo.get_by_id(professeur_id) is None:
+        abort(make_response(jsonify({"error": f"Professeur {professeur_id} introuvable"}), 400))
+
+
+def _verifier_email_libre(email, utilisateur_id=None):
+    """Interrompt la requête (409) si l'email appartient déjà à un AUTRE utilisateur.
+
+    utilisateur_id : l'utilisateur en cours de modification (PATCH), exclu de la
+    comparaison — sinon lui renvoyer son propre email déclencherait un conflit.
+    """
+    existant = repo.get_by_email(email)
+    if existant is not None and existant.id != utilisateur_id:
+        abort(make_response(jsonify({"error": f"L'email {email} est déjà utilisé"}), 409))
+
+
+def lister():
+    utilisateurs = repo.lister_utilisateurs()
+    return jsonify([_serialize(u) for u in utilisateurs]), 200
+
+
+def recuperer(utilisateur_id):
+    utilisateur = repo.get_by_id(utilisateur_id)
+    if utilisateur is None:
+        abort(make_response(jsonify({"error": "Utilisateur introuvable"}), 404))
+    return jsonify(_serialize(utilisateur)), 200
+
+
+def creer():
+    donnees = validate_body(UtilisateurCreate)  # 400 : payload mal formé, ou role/lien incohérents
+    _verifier_email_libre(donnees.email)        # 409 : email déjà pris
+    # Le model_validator garantit qu'une FK non-None correspond bien au role.
+    # Ici on ne vérifie plus QUE l'existence en base.
+    if donnees.eleve_id is not None:
+        _verifier_eleve(donnees.eleve_id)
+    if donnees.professeur_id is not None:
+        _verifier_professeur(donnees.professeur_id)
+    utilisateur = repo.create_utilisateur(donnees.model_dump())
+    return jsonify(_serialize(utilisateur)), 201
+
+
+def modifier(utilisateur_id):
+    donnees = validate_body(UtilisateurUpdate)
+    champs = donnees.model_dump(exclude_unset=True)
+    # Avec exclude_unset=True, seuls les champs réellement envoyés par le client sont dans le dict.
+    if "email" in champs:
+        _verifier_email_libre(champs["email"], utilisateur_id)
+    # Aucune FK à vérifier : UtilisateurUpdate ne les expose pas.
+    utilisateur = repo.update_utilisateur(utilisateur_id, champs)
+    if utilisateur is None:
+        abort(make_response(jsonify({"error": "Utilisateur introuvable"}), 404))
+    return jsonify(_serialize(utilisateur)), 200
+
+
+def supprimer(utilisateur_id):
+    supprime = repo.delete_utilisateur(utilisateur_id)
+    if not supprime:
+        abort(make_response(jsonify({"error": "Utilisateur introuvable"}), 404))
+    return "", 204
+```
+
+### Différence 1 — deux helpers de FK, appelés **conditionnellement**
+
+Élève vérifie toujours sa `maison_id` : elle est obligatoire. Ici les deux FK sont
+**facultatives** → un `if ... is not None` avant chaque appel.
+
+Le commentaire compte : le controller ne revérifie **pas** la cohérence rôle ↔ lien, le
+`model_validator` l'a déjà tranchée ([sec50](#sec50)). Quand `creer()` reçoit son objet
+validé, un `eleve_id` non-`None` implique déjà `role == "eleve"`. Le controller ne fait plus
+qu'un aller-retour en base pour l'**existence**. Schéma = cohérence du payload ;
+controller = état de la base ([sec52](#sec52)).
+
+### Différence 2 — l'unicité de l'email
+
+`email` est `unique=True` dans le modèle. Si un client poste un email déjà pris, le `commit()`
+du repository lève une **`IntegrityError`**.
+
+⚠️ **Contrairement à ce qu'on pourrait croire, ça ne donne pas un 500** : le projet a un
+handler global dans `app/common/errors.py` qui attrape `IntegrityError`, fait un `rollback()`
+et renvoie déjà un **409**. Vérifié en exécution. Le filet de sécurité existe donc *avant*
+tout helper.
+
+**Alors pourquoi `_verifier_email_libre` ?** Pour le **message**. Le handler global ne peut
+que dire « Conflit : violation d'une contrainte d'unicité ou d'intégrité » — il ne sait pas
+*laquelle*. Le helper, lui, dit « L'email x@y.fr est déjà utilisé ». Et il vérifie **avant
+d'écrire**, plutôt que de laisser la base échouer puis rembobiner la transaction.
+
+Corollaire : la contrainte `unique=True` sur `eleve_id`/`professeur_id` (« un compte par
+élève ») n'a **pas** besoin de helper. Un second compte sur le même élève retombe sur le
+handler global → 409, avec le message générique. C'est acceptable : le cas est rare, et
+aucun code applicatif ne le décrit.
+
+**Pourquoi 409 et pas 400 ?** La requête est *bien formée* ; elle entre seulement en
+**conflit avec l'état actuel** de la ressource. C'est la définition de `409 Conflict`.
+
+Le message peut dire « cet email est déjà utilisé » : un `POST /utilisateurs` est un endpoint
+d'**inscription**. Sur `/login` ce serait une fuite ([sec48](#sec48)) — pas ici.
+
+### Différence 3 — le PATCH doit s'exclure lui-même
+
+Patcher l'utilisateur 3 en lui redonnant **son propre email** ne doit pas produire un 409.
+`get_by_email()` renverra pourtant bien un objet : lui-même.
+
+La condition n'est donc pas « un utilisateur porte cet email » mais « **un autre** utilisateur
+porte cet email ». D'où le paramètre `utilisateur_id=None` du helper :
+
+- **En création** on ne le passe pas → il vaut `None`, et comme aucun `id` en base ne vaut
+  `None`, `existant.id != utilisateur_id` est vrai dès qu'un utilisateur porte l'email.
+- **En modification** on passe l'`id` de l'URL → l'utilisateur lui-même est ignoré.
+
+Bug typique qu'on ne voit qu'en le testant.
+
+À l'inverse, `modifier()` n'a **aucune** vérification de FK à faire (`UtilisateurUpdate` ne les
+expose pas) : elle est plus courte que celle d'Élève.
+
+### Une nuance assumée
+
+Dans `modifier()`, patcher un utilisateur **inexistant** avec un email **déjà pris** renvoie
+409 **avant** le 404. Le corriger demanderait un `get_by_id` supplémentaire sur le chemin
+normal. Les quatre autres controllers ont la même caractéristique (FK vérifiée avant de
+découvrir le 404) : rester cohérent plutôt que traiter Utilisateur à part.
+
+### Ordre des opérations dans `creer()`
+
+`validate_body` (400) → unicité email (409) → existence des FK (400) → `create` (201).

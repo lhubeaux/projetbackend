@@ -11,3 +11,4 @@ from app.dal.models.maison import Maison
 from app.dal.models.professeur import Professeur
 from app.dal.models.cours import Cours
 from app.dal.models.eleve import Eleve
+from app.dal.models.utilisateur import Utilisateur

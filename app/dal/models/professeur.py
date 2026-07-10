@@ -16,6 +16,8 @@ class Professeur(TimestampMixin, db.Model):
     anciennete: Mapped[int] = mapped_column(default=0)
 
     cours: Mapped[list["Cours"]] = relationship(back_populates="professeur")
+    utilisateur: Mapped["Utilisateur | None"] = relationship(back_populates="professeur")
+
 
     def __repr__(self): #permet une représenation plus propre pour le dev
         return f"<ID: {self.id} - Professeur : {self.nom}>"
