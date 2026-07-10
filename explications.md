@@ -50,6 +50,7 @@ Ce fichier regroupe les concepts expliqués au fil du projet.
 44. [Refuser la suppression d'un parent qui a des enfants (409 explicite)](#sec44)
 45. [Qu'est-ce qu'une fonction « helper » ?](#sec45)
 46. [Vérifier une FK dans le controller, morceau par morceau](#sec46)
+47. [`Literal[]` de Pydantic : annotation de type, pas argument de `Field()`](#sec47)
 
 ---
 
@@ -2530,3 +2531,69 @@ valider la forme  →  valider les références  →  agir  →  répondre
 
 Chaque garde fait gagner une certitude pour la suite. Même structure que
 `controller_professeur.supprimer()` ([sec44](#sec44)).
+
+---
+
+<a id="sec47"></a>
+## `Literal[]` de Pydantic : annotation de type, pas argument de `Field()`
+
+### D'où il vient
+
+`Literal` n'appartient pas à Pydantic : c'est un outil du module standard `typing`.
+
+```python
+from typing import Literal
+```
+
+### Une annotation de type, au même endroit que `str` ou `int`
+
+Contrairement à `min_length`, `max_length` ou `pattern` (qui sont des **arguments** de
+`Field()`), `Literal` **remplace le type** lui-même :
+
+```python
+statut: Literal["inscrit", "diplome", "renvoye"]
+```
+
+Lecture : « `statut` n'est pas n'importe quelle chaîne, c'est **exactement une** de ces
+trois valeurs ». Toute autre valeur est rejetée automatiquement (400 via
+`validate_body`, [sec18](#sec18)), sans avoir besoin d'un `pattern` regex à la main.
+
+### Avec une valeur par défaut
+
+`Field()` reste utile pour le `default`, mais en argument **nommé**, pas en position :
+
+```python
+statut: Literal["inscrit", "diplome", "renvoye"] = Field(default="inscrit")
+# raccourci équivalent :
+statut: Literal["inscrit", "diplome", "renvoye"] = "inscrit"
+```
+
+### Champ optionnel (schéma `Update`)
+
+Même recette que les autres champs optionnels du projet, avec `| None` :
+
+```python
+statut: Literal["inscrit", "diplome", "renvoye"] | None = Field(default=None)
+```
+
+### Erreur rencontrée
+
+```python
+familier: str = Field(Literal["inscrit", "diplome", "renvoye"])
+```
+
+Deux fautes cumulées :
+1. `Literal[...]` passé **en position** à `Field()` — qui attend un `default` à cette
+   place, pas un type. Ne valide rien.
+2. Le `Literal` visait en réalité `statut` (les 3 valeurs du modèle `Eleve`,
+   [sec23](#sec23)), pas `familier` (qui doit rester un `str` libre, ex. "Hedwige").
+   C'est `statut` qui portait à la place un `pattern` de date copié depuis
+   `annee_academique` de `Cours` — encore le piège du copier-coller entre verticales
+   (déjà vu en [sec45](#sec45)).
+
+### Repère mental
+
+`Field(...)` = **comment** contraindre une valeur (bornes, regex, défaut).
+`Literal[...]` = **quelles** valeurs sont même autorisées, au niveau du type. Les deux se
+combinent (`Literal[...] = Field(default=...)`), mais `Literal` n'est jamais un argument
+*dans* `Field()`.

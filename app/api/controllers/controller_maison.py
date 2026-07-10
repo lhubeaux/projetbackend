@@ -43,7 +43,16 @@ def modifier(maison_id):
 
 
 def supprimer(maison_id):
-    supprimee = repo.delete_maison(maison_id)
-    if not supprimee:
+    maison = repo.get_by_id(maison_id)
+    if maison is None:
         abort(make_response(jsonify({"error": "Maison introuvable"}), 404))
+
+    nb_eleves = len(maison.eleves)
+    if nb_eleves > 0:
+        abort(make_response(jsonify({
+            "error": f"Impossible de supprimer : cette maison compte {nb_eleves} élèves"
+        }), 409))
+
+    repo.delete_maison(maison_id)
     return "", 204
+

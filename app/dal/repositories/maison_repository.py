@@ -1,3 +1,9 @@
+"""Repository Maison : accès aux données pour la ressource Maison.
+
+Seul endroit qui exécute des requêtes SQLAlchemy sur cette table (CRUD).
+Aucune logique HTTP ni décision métier ici : sait chercher/écrire, pas décider.
+"""
+
 from app.dal.models import Maison
 from app.dal.database import db
 

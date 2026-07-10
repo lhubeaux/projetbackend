@@ -1,3 +1,9 @@
+"""Repository Professeur : accès aux données pour la ressource Professeur.
+
+Seul endroit qui exécute des requêtes SQLAlchemy sur cette table (CRUD).
+Aucune logique HTTP ni décision métier ici : sait chercher/écrire, pas décider.
+"""
+
 from app.dal.models import Professeur
 from app.dal.database import db
 
