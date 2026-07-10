@@ -1,34 +1,40 @@
 # Plan de continuation — Académie de Sorcellerie
 
-État des lieux au 10/07 : les verticales **Maison**, **Professeur** et **Cours** sont complètes
-(modèle → repository → schémas Pydantic → controller → routes), la validation Pydantic et les
-timestamps `created_at`/`updated_at` sont déjà en place (exigences du jour 4 prises en avance ✅).
-Le modèle `Eleve` existe mais n'a pas encore sa verticale. `seed.py`, `auth.py`, `conftest.py`
-et `services/` sont des squelettes vides.
+État des lieux au 10/07 (fin d'après-midi) : les **cinq** verticales — **Maison**, **Professeur**,
+**Cours**, **Élève** et **Utilisateur** — sont complètes (modèle → repository → schémas Pydantic →
+controller → routes), vérifiées en exécution de bout en bout, et les préfixes d'URL sont
+uniformisés au pluriel (`/maisons`, `/professeurs`, `/cours`, `/eleves`, `/utilisateurs`).
+La validation Pydantic et les timestamps `created_at`/`updated_at` sont en place (exigences du
+jour 4 prises en avance ✅). Restent pour le jour 1 : le login (1.3), le seed (1.4) et les
+premiers tests (1.5). `seed.py`, `auth.py`, `conftest.py` et `services/` sont des squelettes vides.
 
 ---
 
 ## Étape 1 — Finir le Jour 1 : Élève, Utilisateur, login, seed
 
-### 1.1 Verticale Élève (copier le pattern Cours, qui a déjà une FK)
-- [ ] `eleve_repository.py` : lister / get_by_id / create / update / delete.
-- [ ] `eleve_schema.py` : `EleveCreate`, `EleveUpdate`, `EleveOut`.
-      Contraintes : `annee` entre 1 et 7 (`ge=1, le=7`), `statut` restreint à
-      `inscrit / diplome / renvoye` (un `Literal[...]` Pydantic fait ça proprement).
-- [ ] `controller_eleve.py` : vérifier que `maison_id` existe (→ 400), comme
-      `_verifier_professeur` dans le controller Cours.
-- [ ] `eleve_route.py` + ajout dans `ALL_BLUEPRINTS`.
-- [ ] Garde-fou : à la suppression d'une **Maison** qui a des élèves → 409
-      (même pattern que la suppression d'un professeur avec des cours).
+### 1.1 Verticale Élève ✅ (commit `ef7d1df`)
+- [x] `eleve_repository.py` : lister / get_by_id / create / update / delete.
+- [x] `eleve_schema.py` : `EleveCreate`, `EleveUpdate`, `EleveOut`.
+      `statut` restreint via `Literal[...]` ✅. ⚠️ `annee` n'a que `ge=1` : le `le=7`
+      prévu n'a pas été posé — à ajouter avant le passage d'année du jour 4.
+- [x] `controller_eleve.py` : vérifie que `maison_id` existe (→ 400).
+- [x] `eleve_route.py` + ajout dans `ALL_BLUEPRINTS` (préfixe passé au pluriel `/eleves`).
+- [x] Garde-fou : suppression d'une **Maison** qui a des élèves → 409.
 
-### 1.2 Entité Utilisateur
-- [ ] Modèle `Utilisateur` : `email` (unique), `mot_de_passe` **en clair avec un
-      commentaire explicite "TEMPORAIRE — non hashé, cf. cahier des charges"**,
-      `role` (`eleve / professeur / admin`), `eleve_id` et `professeur_id` **nullables**.
-- [ ] Contrainte applicative (pas en base) : rôle élève ⇒ `eleve_id` obligatoire et
-      `professeur_id` interdit ; rôle professeur ⇒ l'inverse ; admin ⇒ aucun des deux.
-      À valider dans le schéma Pydantic (`model_validator`) ou dans le controller.
-- [ ] CRUD minimal (au moins création + lecture, nécessaire pour le seed et le login).
+### 1.2 Entité Utilisateur ✅ (10/07 après-midi, vérifiée de bout en bout)
+- [x] Modèle `Utilisateur` : `email` (unique), `mot_de_passe` en clair avec commentaire
+      TEMPORAIRE, `role`, FK **nullables** et `unique=True` (1 compte max par élève/prof),
+      relations 1-1 `eleve`/`professeur` posées des deux côtés.
+- [x] Contrainte applicative rôle ⇒ lien : `model_validator(mode="after")` dans
+      `UtilisateurCreate` (cf. explications.md sec48–52).
+- [x] CRUD **complet** (pas seulement minimal) : les 5 endpoints sous `/utilisateurs`.
+      En plus du plan : 409 si email déjà pris (`_verifier_email_libre`, qui exclut
+      l'utilisateur lui-même en PATCH), `UtilisateurUpdate` limité à email/mot_de_passe,
+      `mot_de_passe` jamais sérialisé dans `UtilisateurOut`.
+- ⚠️ Point connu (découvert en vérification) : `DELETE /eleves/<id>` sur un élève
+      référencé par un compte réussit et laisse un utilisateur `role="eleve"` avec
+      `eleve_id = NULL` (SQLite n'applique pas les FK par défaut). À trancher :
+      cascade, 409 comme Maison, ou statu quo documenté.
 
 ### 1.3 Connexion simulée
 - [ ] `POST /login` : email + mot de passe → renvoie l'utilisateur, son rôle,
